@@ -78,7 +78,6 @@ docker run \
 --rm \
 --name nn_clustering-$(whoami) \
 --runtime=nvidia \  # REMOVE, if you don't have GPU
---mount type=bind,source=/scratch,target=/scratch \
 nnsurprisinglymodular/nn-clustering:latest \
 bash
 ```
@@ -87,6 +86,10 @@ And then type
 
 ```bash
 bash build.sh
+```
+This will by default not download model checkpoints, becuase they are many gigabytes of files. If you want to download checkpoints as well, run 
+```bash
+bash build.sh --download_all
 ```
 
 NB: to leave the container, use ctrl-P ctrl-Q. Typing `exit` will destroy the container.
