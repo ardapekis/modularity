@@ -58,4 +58,4 @@ aws s3 cp --recursive s3://nn-modularity/datasets datasets
 cd ..
 
 echo "Deleting this script - you can find it in the repo!"
-rm -- "$0"
+rm build.sh
