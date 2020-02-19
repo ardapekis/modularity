@@ -78,7 +78,7 @@ docker run \
 --rm \
 --name nn_clustering-$(whoami) \
 --runtime=nvidia \  # REMOVE, if you don't have GPU
---mount type=bind,source=/scratch,target=/scratch \  # REMOVE, if not on perceptron or svm machines
+--mount type=bind,source=/scratch,target=/scratch \
 nnsurprisinglymodular/nn-clustering:latest \
 bash
 ```
