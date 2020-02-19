@@ -49,25 +49,23 @@ There are two options to set up the environment:
 
 Useful: [Lifecycle of Docker Container](https://medium.com/@nagarwal/lifecycle-of-docker-container-d2da9f85959)
 
-#### Building the image (done **ONCE** per machine)
+#### Building the image (done if you've made changes you want to run on a Docker elsewhere)
 
 Clone the repository and change to the `devops` directory.
-
-It was already done this step for `perception` and `svm`.
 
 ```bash
 docker build -t nnsurprisinglymodular/nn-clustering .
 ```
 
-#### Creating a container (done **ONCE** by one user per one machine)
+#### Running the Container
+To get the container, run 
+```bash 
+docker pull nnsurprisinglymodular/nn-clusterin
+```
 
-In other words, if you run this commands on, for example, `svm` - you don't need to do so again. You're supposed then to have a *container* there already.
+First, you need a port number to your Jupyter Netbook - pick up a random number in the range 8000-8500. 
 
-First, you need a port number to your Jupyter Netbook - pick up a random number (with your favoriate generator) in the range 8000-8500.
-We pick up a random number so you don't collide with existing notebooks on that machine.
-
-First run: 
-
+Run:
 - **Remove the comments before**, and 
 - **Replace** `<PORT NUMBER>` with your random port number (also in the instructions that will come later)
 
@@ -94,7 +92,7 @@ bash build.sh --download_all
 
 NB: to leave the container, use ctrl-P ctrl-Q. Typing `exit` will destroy the container.
 
-#### Running the container
+#### Interacting With Container
 
 ```bash
 docker exec \
