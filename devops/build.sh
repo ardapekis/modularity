@@ -17,16 +17,17 @@ read aws_access
 echo "Paste your AWS secret key, followed by [ENTER]"
 read aws_secret
 
-mkdir ~/.aws
+mkdir -p ~/.aws
 
 printf "[default]\nregion = us-west-1" > ~/.aws/config
 
 printf "[default]\naws_access_key_id = %s\naws_secret_access_key = %s" $aws_access $aws_secret > ~/.aws/credentials
 
+rm -rf nn_modularity
 echo "Cloning repo..."
 git clone https://github.com/nn-surprisingly-modular-icml-2020/nn_modularity.git
 
-cd nn_clustering
+cd nn_modularity
 
 echo "Installing Python dependencies..."
 # PIP_USER=yes  # install as --user
