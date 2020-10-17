@@ -46,11 +46,11 @@ MODEL_TAG_LOOKUP = {
 'RANDOM-OVERFITTING+DROPOUT': 'random_mlp_100epochs_dropout',
 'CNN:MNIST': 'mnist_cnn_10epochs',
 'CNN:CIFAR10': 'cifar10_cnn_10epochs',
-'CNN:LINE': 'line_cnn_10epochs',
+#'CNN:LINE': 'line_cnn_10epochs',
 'CNN:FASHION': 'fashion_cnn_10epochs',
 'CNN:MNIST+DROPOUT': 'mnist_cnn_10epochs_dropout',
 'CNN:CIFAR10+DROPOUT': 'cifar10_cnn_10epochs_dropout',
-'CNN:LINE+DROPOUT': 'line_cnn_10epochs_dropout',
+#'CNN:LINE+DROPOUT': 'line_cnn_10epochs_dropout',
 'CNN:FASHION+DROPOUT': 'fashion_cnn_10epochs_dropout',
 }
 
@@ -70,9 +70,10 @@ def get_model_path(model_tag, date_tag='*', time_tag='*', filter_='last',
     paths = list(paths)
     assert paths, ('No model path, which correspond to the tags and base path, was found!'
                    'If you are sure that the tags are correct, please check whether'
-                   '`model_base_path` points to directory of where the models are saved.')
+                   '`model_base_path` points to directory of where the models are saved.'
+                   f'Tag: {model_tag} Base Path: {model_base_path}')
     
-    # The "maximual" path is the latest, because we use the date and time tags format as string
+    # The "maximal" path is the latest, because we use the date and time tags format as string
     # <year>-<month>-<date> and <hour>-<minutes>-<seconds>, respectively.
     # So the lexical order corresponds to time order (early to recent).
     if filter_ == 'last':

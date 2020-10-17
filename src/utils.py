@@ -62,7 +62,8 @@ def load_model2(model_path):
     if 'unpruned' not in str(model_path):
         custom_objects['PruneLowMagnitude'] = sparsity.pruning_wrapper.PruneLowMagnitude
     
-    return tf.keras.models.load_model(model_path,
+    with tf.device('/cpu:0'):
+        return tf.keras.models.load_model(model_path,
                                       custom_objects=custom_objects)
 
 

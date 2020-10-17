@@ -2,6 +2,9 @@
 
 
 import numpy as np
+import cugraph
+import cudf
+import networkx
 import math
 #from multiprocessing import Pool
 from pathos.multiprocessing import ProcessPool
@@ -19,7 +22,8 @@ from sacred.observers import FileStorageObserver
 
 from collections import Counter, deque
 
-# import ipdb
+import ipdb
+from IPython.core.debugger import Tracer
 
 from src.utils import splitter, load_weights, compute_pvalue
 from src.cnn import CNN_MODEL_PARAMS
@@ -51,9 +55,10 @@ def my_config():
     # with different number of worker, the statistics might be slightly different
     # maybe because different order of calls to the random generator?
     # but the statistics are the same for given `seed` and `n_workers`
-    n_workers = 10
+    n_workers = 1
     is_testing = False
     with_shuffled_ncuts = False
+    use_cugraph = True
 
 
 
@@ -65,8 +70,8 @@ def cnn_config():
     conv_layers = CNN_MODEL_PARAMS['conv'] 
     fc_layer_widths = CNN_MODEL_PARAMS['dense']
     shuffle_smaller_model = False
-    num_samples = 120
-    n_workers = 30
+    num_samples = 10
+    n_workers = 1
     as_sparse = True
 
 @clustering_experiment.named_config
@@ -497,15 +502,36 @@ def cnn_tensors_to_flat_weights_and_graph(weights_array, max_weight_convention, 
     return (flat_weights_array, adj_mat)
 
 
+def cluster_net(n_clusters, adj_mat, eigen_solver, assign_labels, use_cugraph=False):
+    if use_cugraph:
+        df = cugraph_clustering(n_clusters, adj_mat)
+        return df["cluster"].to_array()
+    else:
+        cluster_alg = SpectralClustering(n_clusters=n_clusters,
+                                        eigen_solver=eigen_solver,
+                                        affinity='precomputed',
+                                        assign_labels=assign_labels)
+        clustering = cluster_alg.fit(adj_mat)
+        return clustering.labels_
 
-def cluster_net(n_clusters, adj_mat, eigen_solver, assign_labels):
-    cluster_alg = SpectralClustering(n_clusters=n_clusters,
-                                     eigen_solver=eigen_solver,
-                                     affinity='precomputed',
-                                     assign_labels=assign_labels)
-    clustering = cluster_alg.fit(adj_mat)
-    return clustering.labels_
 
+def cugraph_clustering(n_clusters, adj_mat):
+    #G = networkx.from_scipy_sparse_matrix(adj_mat)
+    #edges = G.edges(data=True)
+    #edges = list(map(lambda x: (x[0], x[1], x[2]["weight"]), edges))
+    #edges = cudf.DataFrame(data=edges, columns=["src", "dst", "wgt"])
+    #G = cugraph.Graph()
+    #G.from_cudf_edgelist(edges, source="src", destination="dst", edge_attr="wgt")
+    adj_mat = copy.copy(adj_mat)
+    adj_mat = adj_mat.tocsr()
+    offsets = cudf.Series(adj_mat.indptr)
+    indices = cudf.Series(adj_mat.indices)
+    values = cudf.Series(adj_mat.data)
+    G = cugraph.Graph()
+    G.from_cudf_adjlist(offsets, indices, values)
+    clustering = cugraph.spectralModularityMaximizationClustering(G, n_clusters, n_clusters)
+    return clustering
+    
 
 def cluster_proportions_per_layer(clustering, num_clusters, weights_array):
     # for each layer, count how many times each cluster appears in it, then
@@ -652,17 +678,19 @@ def compute_ncut(adj_mat, clustering_labels, epsilon, verbose=False):
 
 def weights_array_to_cluster_quality(weights_array, adj_mat, num_clusters,
                                      eigen_solver, assign_labels, epsilon,
-                                     is_testing=False):
+                                     is_testing=False, use_cugraph=False):
     # t1 = time.time()
-    clustering_labels = cluster_net(num_clusters, adj_mat, eigen_solver, assign_labels)
+    clustering_labels = cluster_net(num_clusters, adj_mat, eigen_solver, assign_labels, use_cugraph)
+    with open("log.log", 'w') as f:
+        f.write(str(clustering_labels))
     # t2 = time.time()
     ncut_val = compute_ncut(adj_mat, clustering_labels, epsilon, verbose=is_testing)
 
-    if is_testing:
-        ncut_val_previous_method = ncut(weights_array, num_clusters, clustering_labels, epsilon)
-        print('NCUT Current', ncut_val)
-        print('NCUT Previous', ncut_val_previous_method)
-        assert math.isclose(ncut_val, ncut_val_previous_method, abs_tol=1e-5)
+    #if is_testing:
+    #    ncut_val_previous_method = ncut(weights_array, num_clusters, clustering_labels, epsilon)
+    #    print('NCUT Current', ncut_val)
+    #    print('NCUT Previous', ncut_val_previous_method)
+    #    assert math.isclose(ncut_val, ncut_val_previous_method, abs_tol=1e-5)
 
     return ncut_val, clustering_labels
 
@@ -803,7 +831,7 @@ def shuffle_and_cluster(num_samples, #weights,
                         #loaded_weights,
                         network_type, num_clusters,
                         shuffle_smaller_model, eigen_solver, delete_isolated_ccs_bool,
-                        assign_labels, epsilon, shuffle_method):
+                        assign_labels, epsilon, shuffle_method, use_cugraph=False):
 
     ######
     loaded_weights = load_weights(weights_path)
@@ -870,7 +898,7 @@ def shuffle_and_cluster(num_samples, #weights,
                                                          shuff_adj_mat,
                                                          num_clusters,
                                                          eigen_solver,
-                                                         assign_labels, epsilon)
+                                                         assign_labels, epsilon, use_cugraph=use_cugraph)
         shuff_ncuts.append(shuff_ncut)
         #shuff_ncuts = np.append(shuff_ncuts, shuff_ncut)
         # t_end = time.time()
@@ -884,7 +912,7 @@ def run_clustering(weights_path, num_clusters, eigen_solver, assign_labels,
                    epsilon, num_samples, delete_isolated_ccs_bool, network_type,
                    shuffle_smaller_model,
                    with_labels, with_shuffle, shuffle_method, n_workers,
-                   is_testing, with_shuffled_ncuts):
+                   is_testing, with_shuffled_ncuts, use_cugraph=False):
     # t0 = time.time()
     # load weights and get adjacency matrix
     if is_testing:
@@ -936,7 +964,7 @@ def run_clustering(weights_path, num_clusters, eigen_solver, assign_labels,
                                                                           num_clusters,
                                                                           eigen_solver,
                                                                           assign_labels, epsilon,
-                                                                          is_testing)
+                                                                          is_testing, use_cugraph=use_cugraph)
     ave_in_out = (1 - unshuffled_ncut / num_clusters) / (2 * unshuffled_ncut
                                                          / num_clusters)
             
@@ -958,7 +986,7 @@ def run_clustering(weights_path, num_clusters, eigen_solver, assign_labels,
                              # loaded_weights,
                              network_type, num_clusters,
                              shuffle_smaller_model, eigen_solver, delete_isolated_ccs_bool,
-                             assign_labels, epsilon, shuffle_method)
+                             assign_labels, epsilon, shuffle_method, use_cugraph)
         if n_workers == 1:
             print('No Pool! Single Worker!')
             shuff_ncuts = shuffle_and_cluster(*function_argument)
@@ -968,10 +996,12 @@ def run_clustering(weights_path, num_clusters, eigen_solver, assign_labels,
 
             workers_arguments = [[copy.deepcopy(arg) for _ in range(n_workers)]
                                   for arg in function_argument]
-
-            with ProcessPool(nodes=n_workers) as p:
-                shuff_ncuts_results = p.map(shuffle_and_cluster,
-                                            *workers_arguments)
+            if use_cugraph:
+                shuff_ncuts_results = map(shuffle_and_cluster, *workers_arguments)
+            else:
+                with ProcessPool(nodes=n_workers) as p:
+                    shuff_ncuts_results = p.map(shuffle_and_cluster,
+                                                *workers_arguments)
 
             shuff_ncuts = np.concatenate(shuff_ncuts_results)                     
 
