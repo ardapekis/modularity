@@ -1,11 +1,6 @@
 import sys
 sys.path.append('..')
 
-import matplotlib.pylab as plt
-import pandas as pd
-from tqdm import tqdm
-from IPython import display
-
 from src.visualization import draw_mlp_clustering_report, run_double_spectral_cluster
 from src.utils import get_weights_paths, build_clustering_results
 from src.experiment_tagging import get_model_path, MODEL_TAG_LOOKUP

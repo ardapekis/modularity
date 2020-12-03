@@ -2,6 +2,7 @@ import itertools as it
 
 import numpy as np
 from scipy.sparse import coo_matrix
+import numba
 
 from src.cnn import CNN_MODEL_PARAMS
 
@@ -27,9 +28,154 @@ def sparsify(mat):
     return coo_matrix(mat)  #.tocsc()
 
 
-# TODO: refactor with NumPy broadcasting for speed, maybe using Numba?
-def expand_conv_layer(kernel, input_side, padding='valid', verbose=False, as_sparse=False):
+def expand_conv_layer(kernel, input_side, padding='valid', verbose=False, as_sparse=False, use_cuda=False):
+    if use_cuda:
+        (expanded_layer, 
+         output_side, 
+         constrains, 
+         expanded_layer_nonzero, 
+         constrains_nonzero) = _expand_conv_layer_cuda(kernel, input_side, padding, verbose, as_sparse)
+    else:
+        (expanded_layer, 
+         output_side, 
+         constrains, 
+         expanded_layer_nonzero, 
+         constrains_nonzero) = _expand_conv_layer(kernel, input_side, padding, verbose, as_sparse)
+    if as_sparse:
+        expanded_layer = coo_matrix(
+            (expanded_layer[expanded_layer_nonzero], expanded_layer_nonzero), 
+            shape=expanded_layer.shape)
+        constrains = coo_matrix(
+            (constrains[constrains_nonzero], constrains_nonzero), 
+            shape=constrains.shape)
+        
+    return expanded_layer, output_side, constrains
 
+def _expand_conv_layer_cuda(kernel, input_side, padding='valid', verbose=False, as_sparse=False):
+    assert padding in ('valid', 'same')
+
+    assert kernel.ndim == 4
+    assert kernel.shape[0] == kernel.shape[1]
+
+    kernel_side, _, input_n_channels, output_n_channels, = kernel.shape
+    
+    assert kernel_side % 2 == 1
+
+    kernel_edge = kernel_side // 2
+
+    output_side = input_side
+    
+    expanded_layer = np.zeros((input_side, input_side, input_n_channels,
+                               output_side, output_side, output_n_channels)) 
+    constrains = np.zeros((input_side, input_side, input_n_channels,
+                               output_side, output_side, output_n_channels)) 
+    
+    constants = np.array([output_side, output_n_channels, kernel_edge, input_n_channels, input_side], dtype=np.long)
+
+    # RTX 2080 Ti has 68 SM units, and max threads per block of 1024
+    threads_per_block = 1024
+    number_of_blocks = expanded_layer.size // threads_per_block + 1
+    _expand_conv_layer_kernel[number_of_blocks, threads_per_block](constants, kernel, expanded_layer, constrains)
+
+    # valid is reduced same
+    if padding == 'valid':
+
+        expanded_layer = expanded_layer[:, :, :,
+                                        kernel_edge:-kernel_edge if kernel_edge else output_side,
+                                        kernel_edge:-kernel_edge if kernel_edge else output_side,
+                                        :]
+
+        constrains = constrains[:, :, :,
+                                kernel_edge:-kernel_edge if kernel_edge else output_side,
+                                kernel_edge:-kernel_edge if kernel_edge else output_side,
+                                :]
+        
+        expanded_layer = np.ascontiguousarray(expanded_layer)
+        constrains = np.ascontiguousarray(constrains)
+
+        output_side = input_side - kernel_side + 1
+
+    expanded_layer = expanded_layer.reshape(input_side**2 * input_n_channels,
+                                            output_side**2 * output_n_channels)
+
+    constrains = constrains.reshape(input_side**2 * input_n_channels,
+                                    output_side**2 * output_n_channels)
+    
+    if as_sparse:
+        expanded_layer_nonzero = _calc_nonzeros(expanded_layer)
+        constrains_nonzero = _calc_nonzeros(constrains)
+    else:
+        expanded_layer_nonzero = None
+        constrains_nonzero = None
+        
+    return expanded_layer, output_side, constrains, expanded_layer_nonzero, constrains_nonzero
+
+
+@numba.njit
+def _calc_nonzeros(array):
+    return array.nonzero()
+
+
+#@numba.cuda.jit
+def _expand_conv_layer_kernel(constants, kernel, expanded_layer, constrains):
+    # constants: (output_side, output_n_channels, kernel_edge, input_n_channels, input_side)
+    thread_position = numba.cuda.grid(1)
+    thread_size = numba.cuda.gridsize(1)
+    
+    # Load the constants
+    output_side = constants[0]
+    output_n_channels = constants[1]
+    kernel_edge = constants[2]
+    input_n_channels = constants[3]
+    input_side = constants[4]
+    # Calculate the dimensions
+    in_chan_size = input_n_channels
+    kernel_col_size = (2 * kernel_edge + 1) * in_chan_size
+    kernel_row_size = (2 * kernel_edge + 1) * kernel_col_size
+    out_chan_size = output_n_channels * kernel_row_size
+    out_col_size = output_side * out_chan_size
+    out_row_size = output_side * out_col_size
+    
+    if thread_position >= out_row_size:
+        return
+
+    # Calculate the positions
+    remainder = thread_position
+    out_row = remainder // out_col_size
+    remainder = remainder % out_col_size
+    out_col = remainder // out_chan_size
+    remainder = remainder % out_chan_size
+    out_chan = remainder // kernel_row_size
+    remainder = remainder % kernel_row_size
+    index = remainder + 1
+    kernel_row = (remainder // kernel_col_size) - kernel_edge
+    remainder = remainder % kernel_col_size
+    kernel_col = (remainder // in_chan_size) - kernel_edge
+    remainder = remainder % in_chan_size
+    in_chan = remainder // 1
+    remainder = remainder % 1
+    
+    in_row = out_row + kernel_row
+    in_col = out_col + kernel_col
+    
+    if in_row < 0 or in_col < 0 or in_row >= input_side or in_col >= input_side:
+        return
+    
+    if (in_row >= expanded_layer.shape[0]
+        or in_col >= expanded_layer.shape[1]
+        or in_chan >= expanded_layer.shape[2]
+        or out_row >= expanded_layer.shape[3]
+        or out_col >= expanded_layer.shape[4]
+        or out_chan >= expanded_layer.shape[5]
+        ):
+        return
+    
+    kernel_value = kernel[kernel_row + kernel_edge, kernel_col+ kernel_edge, in_chan, out_chan]
+    expanded_layer[in_row, in_col, in_chan, out_row, out_col, out_chan] = kernel_value
+    constrains[in_row, in_col, in_chan, out_row, out_col, out_chan] = index
+
+@numba.njit
+def _expand_conv_layer(kernel, input_side, padding='valid', verbose=False, as_sparse=False):
     assert padding in ('valid', 'same')
 
     assert kernel.ndim == 4
@@ -48,19 +194,17 @@ def expand_conv_layer(kernel, input_side, padding='valid', verbose=False, as_spa
     constrains = np.zeros((input_side, input_side, input_n_channels,
                                output_side, output_side, output_n_channels)) 
 
-    for out_row, out_col, out_chan in it.product(range(output_side),
-                                                 range(output_side),
-                                                 range(output_n_channels)):
+    for out_row in range(output_side):
+     for out_col in range(output_side):
+      for out_chan in range(output_n_channels):
         if verbose:
             print('OUT', out_row, out_col, out_chan)
             
-        for index, (kernel_row, kernel_col, in_chan) in enumerate(
-                                                          it.product(
-                                                              range(-kernel_edge, kernel_edge+1, 1),
-                                                              range(-kernel_edge, kernel_edge+1, 1),
-                                                              range(input_n_channels)
-                                                          ), start=1
-                                                        ):
+        index = 0
+        for kernel_row in range(-kernel_edge, kernel_edge+1, 1):
+         for kernel_col in range(-kernel_edge, kernel_edge+1, 1):
+          for in_chan in range(input_n_channels):
+            index += 1
 
             in_row = out_row + kernel_row
             in_col = out_col + kernel_col
@@ -90,22 +234,38 @@ def expand_conv_layer(kernel, input_side, padding='valid', verbose=False, as_spa
                                 kernel_edge:-kernel_edge if kernel_edge else output_side,
                                 kernel_edge:-kernel_edge if kernel_edge else output_side,
                                 :]
+        
+        expanded_layer = np.ascontiguousarray(expanded_layer)
+        constrains = np.ascontiguousarray(constrains)
 
         output_side = input_side - kernel_side + 1
 
-    expanded_layer = expanded_layer.reshape(input_side**2 * input_n_channels, output_side**2 * output_n_channels)
+    expanded_layer = expanded_layer.reshape(input_side**2 * input_n_channels,
+                                            output_side**2 * output_n_channels)
 
     constrains = constrains.reshape(input_side**2 * input_n_channels,
                                     output_side**2 * output_n_channels)
-
+    
     if as_sparse:
-        expanded_layer = sparsify(expanded_layer)
-        constrains = sparsify(constrains)
+        expanded_layer_nonzero = expanded_layer.nonzero()
+        constrains_nonzero = constrains.nonzero()
+    else:
+        expanded_layer_nonzero = None
+        constrains_nonzero = None
         
-    return expanded_layer, output_side, constrains
-
+    return expanded_layer, output_side, constrains, expanded_layer_nonzero, constrains_nonzero
 
 def expand_pool_layer(pool_size, input_side, n_channels, with_avg=False, verbose=False, as_sparse=False):
+    expanded_pool, output_side, constrains, expanded_pool_nonzero, constrains_nonzero = _expand_pool_layer(pool_size, input_side, n_channels, with_avg, verbose, as_sparse)
+
+    if as_sparse:
+        expanded_pool = coo_matrix((expanded_pool[expanded_pool_nonzero], expanded_pool_nonzero), shape=expanded_pool.shape)
+        constrains = coo_matrix((constrains[constrains_nonzero], constrains_nonzero), shape=constrains.shape)
+        
+    return expanded_pool, output_side, constrains
+
+@numba.njit
+def _expand_pool_layer(pool_size, input_side, n_channels, with_avg=False, verbose=False, as_sparse=False):
     
     assert pool_size[0] == pool_size[0]
     
@@ -120,10 +280,9 @@ def expand_pool_layer(pool_size, input_side, n_channels, with_avg=False, verbose
     
     value = 1 / pool_side**2 if with_avg else 1
 
-    for out_row, out_col, chan, in it.product(range(output_side),
-                                              range(output_side),
-                                              range(n_channels)):
-        
+    for out_row in range(output_side):
+     for out_col in range(output_side):
+      for chan in range(n_channels):
         in_start_row = out_row * pool_side
         in_start_col = out_col * pool_side
         
@@ -142,12 +301,15 @@ def expand_pool_layer(pool_size, input_side, n_channels, with_avg=False, verbose
         
     expanded_pool = expanded_pool.reshape(input_side**2 * n_channels, output_side**2 * n_channels)
     constrains = np.zeros_like(expanded_pool)
-
+    
     if as_sparse:
-        expanded_pool = sparsify(expanded_pool)
-        constrains = sparsify(constrains)
-        
-    return expanded_pool, output_side, constrains
+        expanded_pool_nonzero = expanded_pool.nonzero()
+        constrains_nonzero = constrains.nonzero()
+    else:
+        expanded_pool_nonzero = None
+        constrains_nonzero = None
+
+    return expanded_pool, output_side, constrains, expanded_pool_nonzero, constrains_nonzero
 
 
 def expand_bias_conv_layer(bias, output_side, as_sparse=False):

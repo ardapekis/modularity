@@ -70,7 +70,7 @@ def cnn_config():
     conv_layers = CNN_MODEL_PARAMS['conv'] 
     fc_layer_widths = CNN_MODEL_PARAMS['dense']
     shuffle_smaller_model = False
-    num_samples = 10
+    num_samples = 20
     n_workers = 1
     as_sparse = True
 
